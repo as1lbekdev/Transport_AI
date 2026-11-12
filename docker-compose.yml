@@ -1,0 +1,18 @@
+# 2-bosqichda kerak bo'ladi (GPS nuqtalarni saqlash). Hozircha ishga tushirish shart emas.
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    environment:
+      POSTGRES_DB: transport
+      POSTGRES_USER: transport
+      POSTGRES_PASSWORD: transport
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+volumes:
+  pgdata:

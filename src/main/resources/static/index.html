@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="uz">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Transport monitoring</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+  html, body { height: 100%; margin: 0; font-family: sans-serif; }
+  #map { height: 100%; }
+  .panel { position: absolute; z-index: 1000; background: #fff; border-radius: 8px;
+           box-shadow: 0 1px 6px rgba(0,0,0,.3); font-size: 13px; }
+  #info { top: 10px; left: 55px; padding: 8px 12px; max-width: 60%; }
+  #list { top: 56px; left: 10px; padding: 8px 10px; width: 210px; max-height: 50%; overflow-y: auto; }
+  #list h4 { margin: 0 0 6px; font-size: 13px; }
+  .row { display: flex; align-items: center; gap: 6px; padding: 3px 4px; cursor: pointer; border-radius: 4px; }
+  .row:hover { background: #eee; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+  .spd { margin-left: auto; color: #555; }
+  #legend { bottom: 24px; left: 10px; padding: 8px 12px; line-height: 1.6; }
+  #cmp { bottom: 24px; right: 10px; padding: 8px 10px; display: none; max-width: 95%; }
+  #cmp table { border-collapse: collapse; }
+  #cmp th, #cmp td { padding: 3px 8px; text-align: right; border-bottom: 1px solid #eee; }
+  #cmp th:first-child, #cmp td:first-child { text-align: left; }
+  #search { top: 10px; right: 10px; width: 270px; padding: 8px 10px; }
+  #search input { width: 100%; box-sizing: border-box; margin: 3px 0; padding: 6px; font-size: 13px; }
+  #search button { margin: 4px 0 0; width: 100%; padding: 7px; }
+  .res div { cursor: pointer; padding: 4px; font-size: 12px; border-bottom: 1px solid #eee; }
+  .res div:hover { background: #e8eefc; }
+  button { margin-left: 8px; }
+</style>
+</head>
+<body>
+<div id="info" class="panel"><span id="text">Yo'l hisoblash uchun xaritada 2 nuqta bosing</span><button id="btnReset">Tozalash</button></div>
+<div id="list" class="panel"><h4>Mashinalar</h4><div id="rows"></div></div>
+<div id="legend" class="panel">
+  <span class="dot" style="background:#2e7d32;display:inline-block"></span> Tez (bo'sh yo'l)<br>
+  <span class="dot" style="background:#f9a825;display:inline-block"></span> O'rtacha<br>
+  <span class="dot" style="background:#c62828;display:inline-block"></span> Tirbandlik<br>
+  <span style="color:#1565c0">&#9632;</span> Tirbandlikni hisobga olgan yo'l<br>
+  <span style="color:#777">&#9632;</span> Tirbandlikni hisobga olmagan yo'l<br>
+  <small>Simulyatsiya: soxta mashinalar</small>
+</div>
+<div id="search" class="panel">
+  <input id="qFrom" placeholder="Qayerdan (yozing va Enter bosing)">
+  <input id="qTo" placeholder="Qayerga (yozing va Enter bosing)">
+  <button id="btnGo">Yo'l topish</button>
+</div>
+<div id="cmp" class="panel"></div>
+
+<div id="map"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+  const map = L.map('map').setView([41.3111, 69.2797], 12);
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19, attribution: '&copy; OpenStreetMap'
+  }).addTo(map);
+
+  const COLORS = { green: '#2e7d32', yellow: '#f9a825', red: '#c62828' };
+
+
+  fetch('/api/traffic-zones').then(r => r.json()).then(zones => {
+    zones.forEach(z => {
+      L.circle([z.lat, z.lon], { radius: z.radiusMeters, color: '#c62828',
+        weight: 1, dashArray: '6 6', fillOpacity: 0.08 })
+        .bindTooltip(z.name + ' (tirbandlik zonasi)').addTo(map);
+    });
+  });
+
+
+  const markers = {};
+  const rows = document.getElementById('rows');
+  async function updateVehicles() {
+    try {
+      const list = await (await fetch('/api/vehicles')).json();
+      rows.innerHTML = '';
+      list.forEach(v => {
+        const color = COLORS[v.status];
+        if (!markers[v.id]) {
+          markers[v.id] = L.circleMarker([v.lat, v.lon],
+            { radius: 8, color: '#fff', weight: 2, fillOpacity: 1, fillColor: color }).addTo(map);
+        }
+        const m = markers[v.id];
+        m.setLatLng([v.lat, v.lon]);
+        m.setStyle({ fillColor: color });
+        m.bindTooltip(`${v.name}: ${v.speedKmh} km/soat`);
+        const row = document.createElement('div');
+        row.className = 'row';
+        row.innerHTML = `<span class="dot" style="background:${color}"></span>${v.name}<span class="spd">${v.speedKmh} km/s</span>`;
+        row.onclick = () => map.setView([v.lat, v.lon], 15);
+        rows.appendChild(row);
+      });
+    } catch (e) {  }
+  }
+
+  setInterval(updateVehicles, 1000);
+
+  const realMarkers = {};
+  async function updateRealVehicles() {
+    try {
+      const list = await (await fetch('/api/monitoring/live')).json();
+      list.forEach(v => {
+        if (/^Mashina \d+$/.test(v.name)) return;   // simulyatsiya mashinalari yuqorida chiziladi
+        if (v.lat === null) return;                  // hali nuqta kelmagan
+        const color = v.status === 'MOVING' ? '#1565c0' : v.status === 'STOPPED' ? '#757575' : '#212121';
+        if (!realMarkers[v.id]) {
+          realMarkers[v.id] = L.circleMarker([v.lat, v.lon],
+                  { radius: 9, color: '#fff', weight: 2, fillOpacity: 1, fillColor: color }).addTo(map);
+        }
+        realMarkers[v.id].setLatLng([v.lat, v.lon]).setStyle({ fillColor: color })
+                .bindTooltip(`${v.name}: ${v.speedKmh} km/soat`);
+      });
+    } catch (e) {}
+  }
+  setInterval(updateRealVehicles, 2000);
+  updateRealVehicles();
+  updateVehicles();
+
+  const LABEL = { dijkstra: 'Dijkstra', astar: 'A*', graphhopper: 'GraphHopper' };
+  let pts = [], layers = [];
+  const text = document.getElementById('text');
+  const cmp = document.getElementById('cmp');
+
+  function reset() {
+    layers.forEach(l => map.removeLayer(l)); layers = []; pts = [];
+    cmp.style.display = 'none';
+    text.textContent = "Yo'l hisoblash uchun xaritada 2 nuqta bosing";
+  }
+  document.getElementById('btnReset').onclick = reset;
+
+  map.on('click', async (e) => {
+    if (pts.length === 2) reset();
+    pts.push(e.latlng);
+    layers.push(L.marker(e.latlng).addTo(map));
+    if (pts.length === 1) { text.textContent = "Endi manzil nuqtasini bosing"; return; }
+
+    const [a, b] = pts;
+    try {
+      const r = await fetch(`/api/route/compare?fromLat=${a.lat}&fromLon=${a.lng}&toLat=${b.lat}&toLon=${b.lng}`);
+      const list = await r.json();
+      if (!r.ok) { text.textContent = "Xato: " + (list.error || r.status); return; }
+
+      const free = list.find(x => x.algorithm === 'astar' && !x.trafficAware);
+      const aware = list.find(x => x.algorithm === 'astar' && x.trafficAware);
+      if (free) layers.push(L.polyline(free.points, { color: '#777', weight: 6, dashArray: '8 8' }).addTo(map));
+      if (aware) layers.push(L.polyline(aware.points, { color: '#1565c0', weight: 6 }).addTo(map));
+      if (free && aware) {
+        const f = Math.round(free.timeSeconds / 60), t = Math.round(aware.timeSeconds / 60);
+        text.textContent = `Tirbandlikda: oddiy yo'l ${f} daq, tizim yo'li ${t} daq (${f - t} daqiqa tejaldi)`;
+      }
+
+      let html = `<table><tr><th>Algoritm</th><th>Tirbandlik</th><th>km</th><th>Vaqt (daq)</th><th>Tugunlar</th><th>ms</th></tr>`;
+      list.forEach(x => {
+        html += `<tr><td>${LABEL[x.algorithm]}</td><td>${x.trafficAware ? 'ha' : "yo'q"}</td>` +
+          `<td>${(x.distanceMeters / 1000).toFixed(1)}</td><td>${(x.timeSeconds / 60).toFixed(1)}</td>` +
+          `<td>${x.visitedNodes < 0 ? '-' : x.visitedNodes}</td><td>${x.computeMillis.toFixed(1)}</td></tr>`;
+      });
+      cmp.innerHTML = html + '</table><small>Vaqt: tirbandlikni hisobga olgan kutilayotgan sayohat vaqti</small>';
+      cmp.style.display = 'block';
+    } catch (err) { text.textContent = "Serverga ulanib bo'lmadi"; }
+  });
+
+  // ---- Joy nomi bo'yicha qidiruv ----
+  const chosen = { from: null, to: null };
+
+  function setupSearch(which, inputId, resId) {
+    const input = document.getElementById(inputId);
+    const res = document.getElementById(resId);
+
+    async function doSearch() {
+      const q = input.value.trim();
+      if (q.length < 2) return;
+      res.textContent = 'Qidirilmoqda...';
+      try {
+        const r = await fetch('/api/search?q=' + encodeURIComponent(q));
+        const list = await r.json();
+        if (!r.ok) { res.textContent = list.error || 'Xato'; return; }
+        if (!list.length) { res.textContent = 'Topilmadi'; return; }
+        res.innerHTML = '';
+        list.forEach(p => {
+          const d = document.createElement('div');
+          d.textContent = p.displayName + ' [' + p.type + ']';
+          d.onclick = () => {
+            chosen[which] = p;
+            input.value = p.name;
+            res.innerHTML = '';
+            map.setView([p.lat, p.lon], 14);
+          };
+          res.appendChild(d);
+        });
+      } catch (e) { res.textContent = "Serverga ulanib bo'lmadi"; }
+    }
+
+    input.addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
+    input.addEventListener('input', () => { chosen[which] = null; });
+  }
+  setupSearch('from', 'qFrom', 'rFrom');
+  setupSearch('to', 'qTo', 'rTo');
+
+  // Tanlanmagan bo'lsa, qidiruvning birinchi natijasini oladi
+  async function firstResult(q) {
+    const r = await fetch('/api/search?q=' + encodeURIComponent(q));
+    const list = await r.json();
+    return r.ok && list.length ? list[0] : null;
+  }
+
+  document.getElementById('btnGo').onclick = async () => {
+    const qFrom = document.getElementById('qFrom').value.trim();
+    const qTo = document.getElementById('qTo').value.trim();
+    if (!qFrom || !qTo) { text.textContent = 'Ikkala joyni yozing'; return; }
+    text.textContent = 'Joylar qidirilmoqda...';
+    try {
+      const from = chosen.from || await firstResult(qFrom);
+      const to = chosen.to || await firstResult(qTo);
+      if (!from || !to) {
+        text.textContent = 'Joy topilmadi: ' + (!from ? qFrom : qTo);
+        return;
+      }
+      reset();
+      map.fire('click', { latlng: L.latLng(from.lat, from.lon) });
+      map.fire('click', { latlng: L.latLng(to.lat, to.lon) });
+      map.fitBounds([[from.lat, from.lon], [to.lat, to.lon]], { padding: [60, 60] });
+    } catch (e) { text.textContent = "Serverga ulanib bo'lmadi"; }
+  };
+</script>
+</body>
+</html>

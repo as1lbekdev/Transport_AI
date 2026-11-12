@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="uz">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Transport monitoring paneli</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+    <style>
+        html, body { height: 100%; margin: 0; font-family: sans-serif; }
+        #map { height: 100%; }
+        .panel { position: absolute; z-index: 1000; background: #fff; border-radius: 8px;
+            box-shadow: 0 1px 6px rgba(0,0,0,.3); font-size: 13px; padding: 8px 10px; }
+        #list { top: 10px; left: 55px; width: 250px; max-height: 55%; overflow-y: auto; }
+        #alerts { top: 10px; right: 10px; width: 280px; max-height: 40%; overflow-y: auto; }
+        #report { bottom: 24px; left: 10px; display: none; min-width: 230px; }
+        h4 { margin: 0 0 6px; font-size: 13px; }
+        .row { display: flex; align-items: center; gap: 6px; padding: 3px 4px; cursor: pointer; border-radius: 4px; }
+        .row:hover, .row.sel { background: #e8eefc; }
+        .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+        .right { margin-left: auto; color: #555; }
+        .alert { padding: 4px 0; border-bottom: 1px solid #eee; color: #b71c1c; }
+        .alert small { color: #777; }
+    </style>
+</head>
+<body>
+<div id="list" class="panel"><h4>Mashinalar (<span id="cnt">0</span>)</h4><div id="rows"></div></div>
+<div id="alerts" class="panel"><h4>Ogohlantirishlar</h4><div id="alertRows">Hozircha yo'q</div></div>
+<div id="report" class="panel"></div>
+<div id="map"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+    const map = L.map('map').setView([41.3111, 69.2797], 12);
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19, attribution: '&copy; OpenStreetMap' }).addTo(map);
+
+    const COLOR = { MOVING: '#2e7d32', STOPPED: '#757575', OFFLINE: '#212121' };
+    const TEXT = { MOVING: 'Yurmoqda', STOPPED: "To'xtagan", OFFLINE: "Aloqa yo'q" };
+    const markers = {};
+    let selected = null, trackLayer = null;
+
+    async function loadLive() {
+        try {
+            const list = await (await fetch('/api/monitoring/live')).json();
+            document.getElementById('cnt').textContent = list.length;
+            const rows = document.getElementById('rows');
+            rows.innerHTML = '';
+            list.forEach(v => {
+                const c = COLOR[v.status];
+                if (v.lat !== null) {
+                    if (!markers[v.id]) {
+                        markers[v.id] = L.circleMarker([v.lat, v.lon],
+                            { radius: 8, color: '#fff', weight: 2, fillOpacity: 1, fillColor: c }).addTo(map);
+                        markers[v.id].on('click', () => select(v.id));
+                    }
+                    markers[v.id].setLatLng([v.lat, v.lon]).setStyle({ fillColor: c })
+                        .bindTooltip(`${v.name}: ${v.speedKmh} km/soat (${TEXT[v.status]})`);
+                }
+                const row = document.createElement('div');
+                row.className = 'row' + (v.id === selected ? ' sel' : '');
+                row.innerHTML = `<span class="dot" style="background:${c}"></span>${v.name}` +
+                    `<span class="right">${v.speedKmh} km/s, ${TEXT[v.status]}</span>`;
+                row.onclick = () => select(v.id);
+                rows.appendChild(row);
+            });
+        } catch (e) {}
+    }
+
+    async function select(id) {
+        selected = id;
+        if (trackLayer) map.removeLayer(trackLayer);
+        const pts = await (await fetch(`/api/monitoring/vehicles/${id}/track?minutes=10`)).json();
+        if (pts.length > 1) {
+            trackLayer = L.polyline(pts.map(p => [p.lat, p.lon]), { color: '#1565c0', weight: 4 }).addTo(map);
+            map.fitBounds(trackLayer.getBounds(), { maxZoom: 15 });
+        }
+        const r = await (await fetch(`/api/monitoring/vehicles/${id}/report?minutes=10`)).json();
+        const el = document.getElementById('report');
+        el.style.display = 'block';
+        el.innerHTML = `<h4>${r.vehicleName}: oxirgi 10 daqiqa</h4>` +
+            `Nuqtalar soni: ${r.points}<br>Yurgan masofa: ${r.distanceKm} km<br>` +
+            `O'rtacha tezlik: ${r.avgSpeedKmh} km/soat<br>Eng yuqori tezlik: ${r.maxSpeedKmh} km/soat<br>` +
+            `Tezlik oshgan nuqtalar: ${r.speedingPoints}`;
+    }
+
+    async function loadAlerts() {
+        try {
+            const list = await (await fetch('/api/monitoring/alerts')).json();
+            document.getElementById('alertRows').innerHTML = list.length ? list.map(a =>
+                `<div class="alert">${a.message}<br><small>${new Date(a.createdAt).toLocaleTimeString()}</small></div>`
+            ).join('') : "Hozircha yo'q";
+        } catch (e) {}
+    }
+    // ---- Geofence zonalari ----
+    const zoneLayers = {};
+    function drawZone(z) {
+        zoneLayers[z.id] = L.circle([z.lat, z.lon],
+            { radius: z.radiusMeters, color: '#6a1b9a', weight: 2, fillOpacity: 0.08 })
+            .bindTooltip(z.name).addTo(map);
+    }
+    fetch('/api/monitoring/geofences').then(r => r.json()).then(list => list.forEach(drawZone));
+
+    let addingZone = false;
+    const zoneBtn = document.createElement('button');
+    zoneBtn.textContent = "Zona qo'shish";
+    zoneBtn.style.cssText = 'position:absolute;z-index:1000;bottom:24px;right:10px;padding:8px 12px;font-size:13px';
+    document.body.appendChild(zoneBtn);
+    zoneBtn.onclick = () => {
+        addingZone = !addingZone;
+        zoneBtn.textContent = addingZone ? 'Xaritada joyni bosing...' : "Zona qo'shish";
+    };
+    map.on('click', async (e) => {
+        if (!addingZone) return;
+        addingZone = false;
+        zoneBtn.textContent = "Zona qo'shish";
+        const name = prompt('Zona nomi:');
+        if (!name) return;
+        const radius = parseFloat(prompt('Radius (metr):', '300'));
+        if (!radius) return;
+        const r = await fetch('/api/monitoring/geofences', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, lat: e.latlng.lat, lon: e.latlng.lng, radiusMeters: radius })
+        });
+        if (r.ok) drawZone(await r.json()); else alert("Zonani qo'shib bo'lmadi");
+    });
+
+    setInterval(loadLive, 2000);
+
+    setInterval(loadAlerts, 5000);
+    loadLive(); loadAlerts();
+</script>
+</body>
+</html>
